@@ -2,7 +2,7 @@
   // --- Configuration ---
   const SCRIPT_VERSION = "1.1.0"; // Example version, update as needed
   // DEBUG_MODE should be false in production to reduce script size and console noise
-  const DEBUG_MODE = true;
+  const DEBUG_MODE = false;
   const ENDPOINT = "http://localhost:3000/api/track";
   const SESSION_TIMEOUT_MS = 20 * 60 * 1000; // 20 minutes
   const OPT_OUT_KEY = '_ia_optout';
@@ -168,7 +168,7 @@
         if (sessionId) {
           trackPageView(); // Track current page immediately on opt-in
         } else {
-          log('Could not obtain session ID after opt-in.');
+          console.log('Could not obtain session ID after opt-in.');
         }
         return "Analytics tracking enabled.";
       },
@@ -213,5 +213,5 @@
   } else {
     initializeAnalytics(); // DOMContentLoaded has already fired
   }
-  log('Script Fully Initialized.');
+  console.log('Script Fully Initialized.');
 })();
