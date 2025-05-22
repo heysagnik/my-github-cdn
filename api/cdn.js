@@ -6,7 +6,7 @@ import crypto from 'crypto';
 
 // --- Configuration (Defaults, can be overridden by Vercel Environment Variables) ---
 const REPO_OWNER = process.env.GITHUB_REPO_OWNER || 'heysagnik';
-const REPO_NAME = process.env.GITHUB_REPO_NAME || 'track-script';
+const REPO_NAME = process.env.GITHUB_REPO_NAME || 'my-github-cdn';
 const REPO_BRANCH = process.env.GITHUB_REPO_BRANCH || 'main';
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN; // Optional: For private repos or higher rate limits
 
