@@ -1,3 +1,4 @@
+<script>
 (function() {
   // --- Configuration ---
   const SCRIPT_VERSION = "1.1.0"; // Example version, update as needed
@@ -215,3 +216,4 @@
   }
   log('Script Fully Initialized.');
 })();
+</script>
