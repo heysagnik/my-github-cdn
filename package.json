@@ -1,0 +1,8 @@
+{
+  "name": "my-github-cdn",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "node-fetch": "^2.6.7" // Or "^3.x.x" if you prefer, adjust import accordingly
+  }
+}
