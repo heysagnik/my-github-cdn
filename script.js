@@ -1,230 +1,237 @@
 (function() {
-  // --- Configuration ---
-  const SCRIPT_VERSION = "1.1.0"; // Example version, update as needed
-  // DEBUG_MODE should be false in production to reduce script size and console noise
-  const DEBUG_MODE = true;
-  const ENDPOINT = "http://localhost:3000/api/track";
-  const SESSION_TIMEOUT_MS = 20 * 60 * 1000; // 20 minutes
-  const OPT_OUT_KEY = '_ia_optout';
-  const SESSION_ID_KEY = '_ia_sid';
+  const SV = "1.3.0";
+  const DBG = false;
+  const REST_EP = "http://localhost:3000/api/track";
+  const GQL_EP = "http://localhost:3000/api/graphql";
+  const USE_GQL = true;
+  const EP = USE_GQL ? GQL_EP : REST_EP;
+  const TIMEOUT = 20 * 60 * 1000;
+  const OPT_KEY = '_ia_optout';
+  const SID_KEY = '_ia_sid';
+  const UID_KEY = '_ia_uid';
 
-  // --- Logging Utility ---
-  function log(...args) { if (DEBUG_MODE) console.log('[Analytics]', ...args); }
-  function errorLog(...args) { if (DEBUG_MODE) console.error('[Analytics]', ...args); }
-  function warnLog(...args) { if (DEBUG_MODE) console.warn('[Analytics]', ...args); }
+  const log = (...a) => DBG && console.log('[A]', ...a);
+  const err = (...a) => DBG && console.error('[A]', ...a);
+  const warn = (...a) => DBG && console.warn('[A]', ...a);
 
-  log('Script Initializing. Version:', SCRIPT_VERSION, 'Debug:', DEBUG_MODE, 'Endpoint:', ENDPOINT);
+  log('Init', SV, EP);
   
-  let currentUrl = location.href;
-  let sessionId = getSessionId();
-  let lastActivityTime = Date.now();
+  let url = location.href;
+  let sid = getSID();
+  let lastActivity = Date.now();
   
-  function generateId() {
-    return Math.random().toString(36).substring(2, 10);
-  }
+  function genID() { return Math.random().toString(36).substring(2, 10); }
 
-  function getSessionId() {
-    if (localStorage.getItem(OPT_OUT_KEY)) {
-      log('Opt-out flag is set. No session ID.');
-      return null;
-    }
-    let id = sessionStorage.getItem(SESSION_ID_KEY);
+  function getSID() {
+    if (localStorage.getItem(OPT_KEY)) return null;
+    let id = sessionStorage.getItem(SID_KEY);
     if (!id) {
-      id = generateId();
-      sessionStorage.setItem(SESSION_ID_KEY, id);
-      log('New session ID created:', id);
-    } else {
-      log('Existing session ID found:', id);
+      id = genID();
+      sessionStorage.setItem(SID_KEY, id);
+      log('New sid:', id);
     }
     return id;
   }
   
-  function getUserId() {
-    if (localStorage.getItem(OPT_OUT_KEY)) {
-      return null;
-    }
-    let id = localStorage.getItem('_ia_uid');
+  function getUID() {
+    if (localStorage.getItem(OPT_KEY)) return null;
+    let id = localStorage.getItem(UID_KEY);
     if (!id) {
-      id = generateId();
-      localStorage.setItem('_ia_uid', id);
+      id = genID();
+      localStorage.setItem(UID_KEY, id);
     }
     return id;
   }
   
-  function refreshSession() {
+  function refresh() {
     const now = Date.now();
-    if (now - lastActivityTime > SESSION_TIMEOUT_MS) {
-      log('Session timeout. Refreshing session ID.');
-      // Only refresh if not opted out
-      if (!localStorage.getItem(OPT_OUT_KEY)) {
-        sessionId = generateId();
-        sessionStorage.setItem(SESSION_ID_KEY, sessionId);
+    if (now - lastActivity > TIMEOUT) {
+      if (!localStorage.getItem(OPT_KEY)) {
+        sid = genID();
+        sessionStorage.setItem(SID_KEY, sid);
       } else {
-        sessionId = null; // Ensure session ID is null if opted out during timeout
+        sid = null;
       }
     }
-    lastActivityTime = now;
+    lastActivity = now;
   }
   
-  ["mousedown", "keydown", "touchstart", "scroll"].forEach(eventType => {
-    window.addEventListener(eventType, refreshSession, { passive: true });
-  });
+  ["mousedown", "keydown", "touchstart", "scroll"].forEach(e => 
+    window.addEventListener(e, refresh, { passive: true }));
   
-  function trackPageView() {
-    if (!sessionId) {
-      log('No session ID (possibly opted out or not initialized). Exiting trackPageView.');
-      return;
-    }
+  function pageview() {
+    if (!sid) return;
+    refresh();
+    if (!sid) return;
     
-    refreshSession(); // Ensure session is active and ID is current
-    if (!sessionId) { // Re-check after refresh, in case opt-out happened
-        log('Session ID became null after refresh (e.g. opt-out). Exiting trackPageView.');
-        return;
-    }
-    
-    const searchParams = new URLSearchParams(window.location.search);
-    const payload = {
-      v: SCRIPT_VERSION,
-      type: "pageview",
+    const params = new URLSearchParams(window.location.search);
+    const data = {
       domain: location.hostname,
-      url: location.href, // Full URL
-      path: location.pathname, // Path only
-      ref: document.referrer || null, // Referrer
-      us: searchParams.get('utm_source'),    // utm_source
-      um: searchParams.get('utm_medium'),   // utm_medium
-      uc: searchParams.get('utm_campaign'), // utm_campaign
-      ut: searchParams.get('utm_term'),     // utm_term
-      ue: searchParams.get('utm_content'),  // utm_content (ue for 'element' or 'extra')
-      sid: sessionId,
-      uid: getUserId(),  // New persistent user ID
-      ts: Date.now()
+      type: "pageview",
+      url: location.href,
+      referrer: document.referrer || null,
+      sessionId: sid,
+      uid: getUID()
     };
-    log('Payload to send:', payload);
-    sendPayload(payload);
+
+    if (USE_GQL) {
+      const payload = {
+        query: `mutation Track($input: EventInput!) { track(input: $input) { success sessionId error } }`,
+        variables: { input: data }
+      };
+      send(payload);
+    } else {
+      const payload = {
+        ...data,
+        v: SV,
+        path: location.pathname,
+        us: params.get('utm_source'),
+        um: params.get('utm_medium'),
+        uc: params.get('utm_campaign'),
+        ut: params.get('utm_term'),
+        ue: params.get('utm_content'),
+        ts: Date.now()
+      };
+      send(payload);
+    }
   }
   
-  function sendPayload(data) {
-    const jsonData = JSON.stringify(data);
-    log('Attempting to send payload. Size:', jsonData.length, 'bytes');
+  window.trackEvent = function(name, data) {
+    if (!sid) return;
+    refresh();
+    if (!sid) return;
     
-    fetch(ENDPOINT, {
+    const commonData = {
+      domain: location.hostname,
+      type: "event",
+      url: location.href,
+      eventName: name,
+      eventData: typeof data === 'object' ? JSON.stringify(data) : String(data),
+      sessionId: sid,
+      uid: getUID()
+    };
+    
+    if (USE_GQL) {
+      const payload = {
+        query: `mutation Track($input: EventInput!) { track(input: $input) { success sessionId error } }`,
+        variables: { input: commonData }
+      };
+      send(payload);
+    } else {
+      const payload = {
+        ...commonData,
+        v: SV,
+        referrer: document.referrer || null,
+        ts: Date.now()
+      };
+      send(payload);
+    }
+  };
+  
+  function send(data) {
+    const json = JSON.stringify(data);
+    
+    fetch(EP, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: jsonData,
-      keepalive: true // Important for requests that might outlive the page
+      body: json,
+      keepalive: true
     })
-    .then(response => {
-      if (!response.ok) {
-        response.text().then(text => {
-          errorLog(`HTTP error ${response.status}. Server response: ${text}`);
-        }).catch(() => {
-          errorLog(`HTTP error ${response.status}. Could not retrieve server response.`);
-        });
-        throw new Error(`HTTP error ${response.status}`);
+    .then(r => {
+      if (!r.ok) {
+        r.text().then(t => err(`HTTP ${r.status}: ${t}`)).catch(() => {});
+        throw new Error(`HTTP ${r.status}`);
       }
-      return response.json().catch(() => ({})); // Handle cases where response might not be JSON
+      return r.json().catch(() => ({}));
     })
-    .then(responseData => log('Fetch response:', responseData))
-    .catch(error => {
-      errorLog('Fetch error:', error.message, 'Falling back.');
-      if (navigator.sendBeacon) {
-        try {
-          log('Using navigator.sendBeacon.');
-          if (navigator.sendBeacon(ENDPOINT, jsonData)) {
-            log('sendBeacon call successful (queued).');
-            return;
-          } else {
-            warnLog('sendBeacon call returned false (not queued). Falling back to image.');
-          }
-        } catch (beaconError) {
-          errorLog('sendBeacon error. Falling back to image.', beaconError);
-        }
-      } else {
-        log('navigator.sendBeacon not available. Using image fallback.');
+    .then(r => {
+      if (USE_GQL && r.errors) {
+        err('GQL errors:', r.errors);
+        throw new Error('GQL error');
       }
-      
-      const img = new Image();
-      img.onload = () => log('Image fallback: request likely sent (onload).');
-      img.onerror = () => errorLog('Image fallback: request error (onerror).');
-      const getParam = "?d=" + encodeURIComponent(jsonData);
-      if ((ENDPOINT + getParam).length > 2048) { // Common URL length limit
-          warnLog("Data for image beacon is too long, might be truncated.", (ENDPOINT + getParam).length, "chars");
-      }
-      img.src = ENDPOINT + getParam;
-      log('Image fallback src (truncated):', img.src.substring(0, 200) + (img.src.length > 200 ? '...' : ''));
+    })
+    .catch(e => {
+      err('Send error:', e.message);
+      fallback(data);
     });
   }
   
-  function handleNavigationChange() {
-    if (currentUrl !== location.href) {
-      log('Navigation detected. Old URL:', currentUrl, 'New URL:', location.href);
-      currentUrl = location.href;
-      // Delay slightly to allow SPA routers to update document.title, etc.
-      setTimeout(trackPageView, 150); 
+  function fallback(data) {
+    const json = JSON.stringify(data);
+    
+    if (navigator.sendBeacon) {
+      try {
+        if (navigator.sendBeacon(EP, json)) return;
+        warn('Beacon failed');
+      } catch (e) {
+        err('Beacon error', e);
+      }
+    }
+    
+    if (!USE_GQL) {
+      const img = new Image();
+      const param = "?d=" + encodeURIComponent(json);
+      if ((REST_EP + param).length > 2048) warn("URL too long");
+      img.src = REST_EP + param;
+    } else {
+      err('GQL fallback not available');
     }
   }
   
-  function initializeAnalytics() {
-    log('Initializing analytics interface...');
+  function handleNav() {
+    if (url !== location.href) {
+      url = location.href;
+      setTimeout(pageview, 150);
+    }
+  }
+  
+  function init() {
     window.insightAnalytics = {
       optOut: function() {
-        localStorage.setItem(OPT_OUT_KEY, '1');
-        sessionStorage.removeItem(SESSION_ID_KEY);
-        sessionId = null;
-        log('Opted out. Tracking disabled.');
-        return "Analytics tracking disabled.";
+        localStorage.setItem(OPT_KEY, '1');
+        sessionStorage.removeItem(SID_KEY);
+        sid = null;
+        return "Analytics disabled";
       },
       optIn: function() {
-        localStorage.removeItem(OPT_OUT_KEY);
-        log('Opted in. Re-initializing session and tracking.');
-        sessionId = getSessionId(); // This will create/retrieve a session ID
-        if (sessionId) {
-          trackPageView(); // Track current page immediately on opt-in
-        } else {
-          log('Could not obtain session ID after opt-in.');
-        }
-        return "Analytics tracking enabled.";
+        localStorage.removeItem(OPT_KEY);
+        sid = getSID();
+        if (sid) pageview();
+        return "Analytics enabled";
       },
       isOptedOut: function() {
-        return !!localStorage.getItem(OPT_OUT_KEY);
+        return !!localStorage.getItem(OPT_KEY);
       }
     };
     
     if (!window.insightAnalytics.isOptedOut()) {
-      log('Initial trackPageView call.');
-      trackPageView(); // Initial page view
+      pageview();
       
-      const originalPushState = history.pushState;
-      const originalReplaceState = history.replaceState;
+      const origPush = history.pushState;
+      const origReplace = history.replaceState;
       
       history.pushState = function() {
-        originalPushState.apply(this, arguments);
-        handleNavigationChange();
+        origPush.apply(this, arguments);
+        handleNav();
       };
       
       history.replaceState = function() {
-        originalReplaceState.apply(this, arguments);
-        handleNavigationChange();
+        origReplace.apply(this, arguments);
+        handleNav();
       };
       
-      window.addEventListener('popstate', handleNavigationChange);
-      
+      window.addEventListener('popstate', handleNav);
       window.addEventListener('visibilitychange', () => {
-        if (document.visibilityState === 'visible') {
-          log('Tab became visible, refreshing session.');
-          refreshSession();
-        }
+        if (document.visibilityState === 'visible') refresh();
       });
-    } else {
-      log('User is opted out. No initial pageview track.');
     }
   }
   
-  // Wait for DOM to be ready before initializing
+  window.iaTrackEvent = window.trackEvent;
+  
   if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', initializeAnalytics);
+    document.addEventListener('DOMContentLoaded', init);
   } else {
-    initializeAnalytics(); // DOMContentLoaded has already fired
+    init();
   }
-  log('Script Fully Initialized.');
 })();
