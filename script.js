@@ -39,6 +39,18 @@
     return id;
   }
   
+  function getUserId() {
+    if (localStorage.getItem(OPT_OUT_KEY)) {
+      return null;
+    }
+    let id = localStorage.getItem('_ia_uid');
+    if (!id) {
+      id = generateId();
+      localStorage.setItem('_ia_uid', id);
+    }
+    return id;
+  }
+  
   function refreshSession() {
     const now = Date.now();
     if (now - lastActivityTime > SESSION_TIMEOUT_MS) {
@@ -84,6 +96,7 @@
       ut: searchParams.get('utm_term'),     // utm_term
       ue: searchParams.get('utm_content'),  // utm_content (ue for 'element' or 'extra')
       sid: sessionId,
+      uid: getUserId(),  // New persistent user ID
       ts: Date.now()
     };
     log('Payload to send:', payload);
@@ -168,7 +181,7 @@
         if (sessionId) {
           trackPageView(); // Track current page immediately on opt-in
         } else {
-          console.log('Could not obtain session ID after opt-in.');
+          log('Could not obtain session ID after opt-in.');
         }
         return "Analytics tracking enabled.";
       },
@@ -213,5 +226,5 @@
   } else {
     initializeAnalytics(); // DOMContentLoaded has already fired
   }
-  console.log('Script Fully Initialized.');
+  log('Script Fully Initialized.');
 })();
