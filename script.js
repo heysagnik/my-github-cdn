@@ -1,7 +1,7 @@
 (function() {
   const SV = "1.3.0";
   const DBG = false;
-  const EP = "http://localhost:3000/api/track";
+  const EP = "https://diy-analytics.vercel.app//api/track";
   const TIMEOUT = 20 * 60 * 1000;
   const OPT_KEY = '_ia_optout';
   const SID_KEY = '_ia_sid';
