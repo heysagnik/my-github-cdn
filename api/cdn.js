@@ -1,179 +1,158 @@
-import fetch from 'node-fetch';
-import { promisify } from 'util';
-import path from 'path';
-import zlib from 'zlib';
-import crypto from 'crypto';
+/**
+ * GitHub CDN Handler
+ * Main entry point for serving files from GitHub repository via CDN
+ * @module api/cdn
+ */
 
-// --- Configuration (Defaults, can be overridden by Vercel Environment Variables) ---
-const REPO_OWNER = process.env.GITHUB_REPO_OWNER || 'heysagnik';
-const REPO_NAME = process.env.GITHUB_REPO_NAME || 'my-github-cdn';
-const REPO_BRANCH = process.env.GITHUB_REPO_BRANCH || 'main';
-const GITHUB_TOKEN = process.env.GITHUB_TOKEN; // Optional: For private repos or higher rate limits
+import { config } from '../lib/config.js';
+import { Logger } from '../lib/logger.js';
+import { LRUCache } from '../lib/cache.js';
+import { GitHubClient } from '../lib/github-client.js';
+import { getMimeType, isCompressible } from '../lib/mime-types.js';
+import { compressContent, shouldCompress } from '../lib/compression.js';
+import {
+  validateFilePath,
+  validateMethod,
+  applySecurityHeaders,
+  generateETag,
+  getClientId,
+  RateLimiter,
+} from '../lib/security.js';
+import {
+  sendContent,
+  sendNotModified,
+  sendError,
+  sendMethodNotAllowed,
+  hasValidCache,
+} from '../lib/response-handler.js';
 
-const SERVER_CACHE_SECONDS = parseInt(process.env.CDN_SERVER_CACHE_SECONDS, 10) || 300; // 5 minutes
-const CLIENT_CACHE_SECONDS = parseInt(process.env.CDN_CLIENT_CACHE_SECONDS, 10) || 3600; // 1 hour
-const MIN_COMPRESSION_SIZE_BYTES = parseInt(process.env.CDN_MIN_COMPRESSION_SIZE_BYTES, 10) || 1024; // 1KB
+// --- Initialize Services ---
 
-const GITHUB_RAW_BASE_URL = `https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/${REPO_BRANCH}`;
-const USER_AGENT = `Vercel-CDN/${REPO_OWNER}-${REPO_NAME}`;
+/**
+ * LRU Cache instance for file caching
+ * @type {LRUCache}
+ */
+const fileCache = new LRUCache(
+  config.maxCacheSizeBytes,
+  config.maxCacheEntries,
+  config.serverCacheSeconds
+);
 
-// --- In-memory cache for fetched GitHub files ---
-const fileCache = new Map();
+/**
+ * GitHub client instance
+ * @type {GitHubClient}
+ */
+const githubClient = new GitHubClient({
+  rawBaseUrl: config.githubRawBaseUrl,
+  userAgent: config.userAgent,
+  token: config.githubToken,
+});
 
-// --- MIME Types ---
-const MIME_TYPES = {
-  '.html': 'text/html; charset=utf-8', '.txt': 'text/plain; charset=utf-8', '.css': 'text/css; charset=utf-8',
-  '.csv': 'text/csv; charset=utf-8', '.xml': 'application/xml; charset=utf-8',
-  '.js': 'application/javascript; charset=utf-8', '.mjs': 'application/javascript; charset=utf-8',
-  '.json': 'application/json; charset=utf-8', '.jsonld': 'application/ld+json; charset=utf-8',
-  '.jpeg': 'image/jpeg', '.jpg': 'image/jpeg', '.png': 'image/png', '.gif': 'image/gif',
-  '.svg': 'image/svg+xml', '.webp': 'image/webp', '.ico': 'image/x-icon', '.bmp': 'image/bmp',
-  '.ttf': 'font/ttf', '.otf': 'font/otf', '.woff': 'font/woff', '.woff2': 'font/woff2',
-  '.eot': 'application/vnd.ms-fontobject',
-  '.mp3': 'audio/mpeg', '.wav': 'audio/wav', '.ogg': 'audio/ogg',
-  '.mp4': 'video/mp4', '.webm': 'video/webm',
-  '.pdf': 'application/pdf', '.zip': 'application/zip',
-  'default': 'application/octet-stream'
-};
+/**
+ * Rate limiter instance (100 requests per minute per client)
+ * @type {RateLimiter}
+ */
+const rateLimiter = new RateLimiter(100, 60000);
 
-// --- Compressible Content Types ---
-const COMPRESSIBLE_TYPES_PREFIX = [
-  'text/', 'application/javascript', 'application/json', 'application/xml',
-  'image/svg+xml', 'font/'
-];
-
-// --- Helper Functions ---
-function getMimeType(filePath) {
-  const ext = path.extname(filePath).toLowerCase();
-  return MIME_TYPES[ext] || MIME_TYPES.default;
-}
-
-function isCompressible(contentType) {
-  return COMPRESSIBLE_TYPES_PREFIX.some((prefix) => contentType.startsWith(prefix));
-}
-
-function generateETag(contentBuffer) {
-  return crypto.createHash('sha256').update(contentBuffer).digest('hex');
-}
-
-async function fetchAndCacheFileFromGitHub(filePath) {
-  const normalizedPath = filePath.replace(/^\/+/, ''); // Remove leading slashes
-  const cacheEntry = fileCache.get(normalizedPath);
-
-  if (cacheEntry && Date.now() < cacheEntry.expiresAt) {
-    // console.log(`[CDN Cache HIT]: ${normalizedPath}`);
-    return cacheEntry.data;
-  }
-  // console.log(`[CDN Cache MISS]: ${normalizedPath}, Fetching from GitHub...`);
-
-  const githubUrl = `${GITHUB_RAW_BASE_URL}/${normalizedPath}`;
-  const headers = {
-    'User-Agent': USER_AGENT,
-    'Accept': 'application/vnd.github.v3.raw' // Ensure raw content
-  };
-  if (GITHUB_TOKEN) {
-    headers['Authorization'] = `token ${GITHUB_TOKEN}`;
+/**
+ * Fetch file with caching
+ * @param {string} filePath - File path to fetch
+ * @returns {Promise<Buffer>} File content buffer
+ * @private
+ */
+async function fetchFileWithCache(filePath) {
+  const normalizedPath = filePath.replace(/^\/+/, '');
+  
+  // Check cache first
+  const cached = fileCache.get(normalizedPath);
+  if (cached) {
+    return cached;
   }
 
-  const response = await fetch(githubUrl, { headers });
-
-  if (!response.ok) {
-    const errorText = await response.text();
-    const error = new Error(
-      `GitHub fetch error for ${normalizedPath}: ${response.status} ${response.statusText}. Details: ${errorText.slice(0, 200)}`
-    );
-    error.statusCode = response.status === 404 ? 404 : 502; // 502 for Bad Gateway if GitHub fails other than 404
-    if (response.status === 404) error.code = 'ENOENT';
-    throw error;
-  }
-
-  const buffer = await response.buffer();
-  fileCache.set(normalizedPath, {
-    data: buffer,
-    expiresAt: Date.now() + SERVER_CACHE_SECONDS * 1000,
-  });
+  // Cache miss - fetch from GitHub
+  Logger.cacheMiss(normalizedPath);
+  const buffer = await githubClient.fetchFile(normalizedPath);
+  
+  // Store in cache
+  fileCache.set(normalizedPath, buffer);
+  
   return buffer;
 }
 
-// --- Main Handler ---
+/**
+ * Main CDN handler
+ * Serves files from GitHub repository with caching, compression, and security
+ * @param {Object} req - Request object
+ * @param {Object} res - Response object
+ * @returns {Promise<Object>} Response
+ */
 export default async function handler(req, res) {
-  if (req.method !== 'GET') {
-    res.setHeader('Allow', 'GET');
-    return res.status(405).end('Method Not Allowed');
-  }
-
-  const requestedFile = req.query.file;
-  if (typeof requestedFile !== 'string' || !requestedFile) {
-    return res.status(400).json({ error: 'Query parameter "file" is required.' });
-  }
-
-  // Sanitize path: normalize, remove leading/trailing slashes, prevent traversal
-  const safePath = path.posix.normalize(requestedFile.trim().replace(/^\/+|\/+$/, ''));
-  if (safePath.startsWith('..') || safePath.includes('/..')) {
-    return res.status(400).json({ error: 'Invalid file path (directory traversal attempt detected).' });
-  }
-  if (!safePath || safePath === '.') {
-     return res.status(400).json({ error: 'Invalid or empty file path specified.' });
-  }
-
+  const startTime = Date.now();
+  
   try {
-    const fileBuffer = await fetchAndCacheFileFromGitHub(safePath);
+    // Validate HTTP method
+    if (req.method !== 'GET') {
+      return sendMethodNotAllowed(res, ['GET']);
+    }
+
+    // Get and validate file path
+    const requestedFile = req.query.file;
+    const safePath = validateFilePath(requestedFile);
+
+    // Rate limiting (optional - can be disabled in production)
+    const clientId = getClientId(req);
+    try {
+      rateLimiter.checkLimit(clientId);
+    } catch (rateLimitError) {
+      // Rate limit errors are handled by sendError
+      return sendError(res, rateLimitError, safePath);
+    }
+
+    // Log request
+    Logger.request(req.method, safePath, clientId);
+
+    // Fetch file (with caching)
+    const fileBuffer = await fetchFileWithCache(safePath);
+    
+    // Get MIME type and generate ETag
     const mimeType = getMimeType(safePath);
     const etag = generateETag(fileBuffer);
 
-    // --- Set HTTP Headers ---
-    res.setHeader('Content-Type', mimeType);
-    res.setHeader('ETag', `"${etag}"`); // Strong ETag, quoted
-    res.setHeader('Cache-Control', `public, max-age=${CLIENT_CACHE_SECONDS}`);
-    res.setHeader('Vary', 'Accept-Encoding'); // Important for compression
+    // Apply security headers
+    applySecurityHeaders(res);
 
-    // Security Headers
-    res.setHeader('X-Content-Type-Options', 'nosniff');
-    res.setHeader('X-Frame-Options', 'DENY'); // No embedding in iframes
-    res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
-    res.setHeader('Permissions-Policy', 'geolocation=(), microphone=(), camera=()'); // Deny sensitive APIs
-
-    // Check for client cache (If-None-Match)
-    if (req.headers['if-none-match'] === `"${etag}"`) {
-      return res.status(304).end(); // Not Modified
+    // Check client cache
+    if (hasValidCache(req, etag)) {
+      Logger.response(safePath, 304, Date.now() - startTime);
+      return sendNotModified(res);
     }
 
-    // --- Compression ---
-    const acceptEncoding = req.headers['accept-encoding'] || '';
-    let compressedBuffer = null;
+    // Handle compression
+    let finalBuffer = fileBuffer;
     let contentEncoding = null;
 
-    if (isCompressible(mimeType) && fileBuffer.length > MIN_COMPRESSION_SIZE_BYTES) {
-      if (acceptEncoding.includes('br')) { // Brotli preferred
-        try {
-          compressedBuffer = await promisify(zlib.brotliCompress)(fileBuffer);
-          contentEncoding = 'br';
-        } catch (e) { /* Brotli might not be available or fail */ }
+    if (shouldCompress(mimeType, fileBuffer.length, config.minCompressionSizeBytes, isCompressible)) {
+      const acceptEncoding = req.headers['accept-encoding'] || '';
+      const compressionResult = await compressContent(fileBuffer, acceptEncoding);
+      
+      if (compressionResult.buffer) {
+        finalBuffer = compressionResult.buffer;
+        contentEncoding = compressionResult.encoding;
       }
-      if (!compressedBuffer && acceptEncoding.includes('gzip')) {
-        try {
-          compressedBuffer = await promisify(zlib.gzip)(fileBuffer);
-          contentEncoding = 'gzip';
-        } catch (e) { /* Gzip might fail */ }
-      }
-      // Deflate is less common now, often skipped if gzip is available
     }
 
-    if (compressedBuffer && contentEncoding) {
-      res.setHeader('Content-Encoding', contentEncoding);
-      res.setHeader('Content-Length', compressedBuffer.length);
-      return res.status(200).send(compressedBuffer);
-    } else {
-      res.setHeader('Content-Length', fileBuffer.length);
-      return res.status(200).send(fileBuffer);
-    }
+    // Send response
+    Logger.response(safePath, 200, Date.now() - startTime);
+    return sendContent(res, finalBuffer, {
+      contentType: mimeType,
+      etag,
+      cacheSeconds: config.clientCacheSeconds,
+      contentEncoding,
+    });
 
   } catch (error) {
-    const statusCode = error.statusCode || (error.code === 'ENOENT' ? 404 : 500);
-    // console.error(`[CDN Operation Failed] Path: ${safePath}, Status: ${statusCode}, Error: ${error.message}`);
-    if (statusCode === 404) {
-      return res.status(404).json({ error: `File not found in repository: ${safePath}` });
-    }
-    return res.status(statusCode).json({ error: 'Failed to retrieve file.', details: error.message });
+    const safePath = req.query?.file || 'unknown';
+    Logger.error('CDN handler error', { error, path: safePath });
+    return sendError(res, error, safePath);
   }
 }
